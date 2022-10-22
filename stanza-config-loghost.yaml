@@ -1,4 +1,5 @@
 pipeline:
+## BEGIN Local files collection ##
   - type: file_input
     id: acamar_local
     include:
@@ -11,7 +12,9 @@ pipeline:
       log_host: 'acamar'
       log_source: 'stanza'
     output: gcloud_output
+## END local files collection ##
 
+## BEGIN Home Assistant Logs ##
   - type: file_input
     id: hass_logs
     include:
@@ -23,8 +26,9 @@ pipeline:
     multiline:
       line_start_pattern: '^\d{4}-\d{2}\-\d{2}\s\d{2}:\d{2}:\d{2}.\d{3}\s[A-Z]+\s'
     output: gcloud_output
+## END Home Assistant Logs ##
 
-## pfsense firewall logs
+## BEGIN pfsense firewall logs
   - type: udp_input
     id: pfsense_filterlog
     listen_address: '0.0.0.0:51401'
@@ -34,7 +38,7 @@ pipeline:
       log_source: 'stanza'
     output: pfsense_syslog_router
 
-## route between filterlog, dhcpd, miniupnpd, cron
+### route between filterlog, dhcpd, miniupnpd, cron
   - type: router
     id: pfsense_syslog_router
     routes:
@@ -55,7 +59,7 @@ pipeline:
     regex: '(?P<process>filterlog)\[(?P<pid>\d+)\]: (?P<rule>\d+),(?P<subrule>\d+)*,(?P<anchor>[^,]+)*,(?P<tracker>\d+),(?P<interface>[^,]+),(?P<reason>[^,]+),(?P<action>\w+),(?P<direction>\w+),(?P<ip_specific_data>.*)'
     output: filterlog_ip_router
 
-## ip version routing
+### ip version routing
   - type: router
     id: filterlog_ip_router
     routes:
@@ -66,7 +70,7 @@ pipeline:
       - output: gcloud_output
         expr: 'true'
 
-## ipv4
+### ipv4
   - type: regex_parser
     id: filterlog_ipv4_regex
     parse_from: $record.ip_specific_data
@@ -74,7 +78,7 @@ pipeline:
     regex: '^(?P<ip_ver>4),(?P<tos>[^,]*),(?P<ecn>[^,]*),(?P<ttl>\d+),(?P<id>\d+),(?P<offset>\d+),(?P<flags>\w+),(?P<proto_id>\d+),(?P<proto_text>[^,]+)'
     output: filterlog_proto_router
 
-## ipv6
+### ipv6
   - type: regex_parser
     id: filterlog_ipv6_regex
     parse_from: $record.ip_specific_data
@@ -82,7 +86,7 @@ pipeline:
     regex: '^(?P<ip_ver>6),(?P<class>\w+),(?P<flow_label>[^,]*),(?P<hop_limit>\d+),(?P<proto_text>[^,]+),(?P<proto_id>\d+)'
     output: filterlog_proto_router
 
-## route protocols tcp / udp / igmp / icmp
+### route protocols tcp / udp / igmp / icmp
   - type: router
     id: filterlog_proto_router
     routes:
@@ -99,7 +103,7 @@ pipeline:
       - output: gcloud_output
         expr: 'true'
 
-## tcp parsing
+### tcp parsing
   - type: regex_parser
     id: filterlog_tcp_regex
     parse_from: $record.ip_specific_data
@@ -107,7 +111,7 @@ pipeline:
     regex: '(?:tcp|TCP),(?:\d+,)?(?P<length>\d+),(?P<src_ip>[^,]+),(?P<dest_ip>[^,]+),(?P<src_port>\d+),(?P<dest_port>\d+),(?P<data_length>\d+),(?P<tcp_flags>\w+),(?P<sequence_number>[\d:]*),(?P<ack_number>\d*),(?P<tcp_window>\d*),(?P<urg>[^,]*),(?P<tcp_options>.*)'
     output: gcloud_output
 
-## udp parsing
+### udp parsing
   - type: regex_parser
     id: filterlog_udp_regex
     parse_from: $record.ip_specific_data
@@ -115,7 +119,7 @@ pipeline:
     regex: '(?:udp|UDP),(?:\d+,)?(?P<length>\d+),(?P<src_ip>[^,]+),(?P<dest_ip>[^,]+),(?P<src_port>\d+),(?P<dest_port>\d+),(?P<data_length>\d+)'
     output: gcloud_output
 
-## igmp parsing
+### igmp parsing
   - type: regex_parser
     id: filterlog_icmp_regex
     parse_from: $record.ip_specific_data
@@ -123,7 +127,7 @@ pipeline:
     regex: '(?:icmp|ICMP|ICMPv6|icmpv6),(?:\d+,)?(?P<length>\d+),(?P<src_ip>[^,]+),(?P<dest_ip>[^,]+),(?P<icmp_data>.*)'
     output: gcloud_output
 
-## igmp parsing
+### igmp parsing
   - type: regex_parser
     id: filterlog_igmp_regex
     parse_from: $record.ip_specific_data
@@ -131,7 +135,7 @@ pipeline:
     regex: '(?:igmp|IGMP),(?:\d+),(?P<src_ip>[^,]+),(?P<dest_ip>[^,]+),datalength=(?P<data_length>\d+)'
     output: gcloud_output
 
-## options parsing
+### options parsing
   - type: regex_parser
     id: filterlog_options_regex
     parse_from: $record.ip_specific_data
@@ -160,21 +164,21 @@ pipeline:
       - output: gcloud_output
         expr: 'true'
 
-## DHCP REQ
+### DHCP REQ
   - type: regex_parser
     id: dhcpd_req_regex
     parse_from: $record.dhcp_msg
     regex: 'for (?P<src_ip>[^\s]+) (?:\((?P<src_gw>[^\)]+)\) )*from (?P<src_mac>[^\s]+) (?:\((?P<src_hostname>[^\)]+)\) )*via (?P<src_intf>[^\s]+)'
     output: gcloud_output
 
-## DHCP ack
+### DHCP ack
   - type: regex_parser
     id: dhcpd_ack_regex
     parse_from: $record.dhcp_msg
     regex: 'on (?P<src_ip>[^\s]+) to (?P<src_mac>[^\s]+) (?:\((?P<src_hostname>[^\)]+)\) )*via (?P<src_intf>[^\s]+)'
     output: gcloud_output
 
-## uid lease
+### uid lease
   - type: regex_parser
     id: dhcpd_uid_regex
     parse_from: $record.dhcp_msg
@@ -260,24 +264,19 @@ pipeline:
 ## END rpi_jukebox ##
 
 ## BEGIN dns_update ##
-  - type: udp_input
+  - type: file_input
     id: dnsupdater_syslog
-    listen_address: '0.0.0.0:51405'
+    include:
+      - /var/log/gcp_dns/dnsupdate.log
     labels:
       log_type: 'dns_update'
       log_host: 'acamar'
       log_source: 'stanza'
-    output: dnsupdater_init_regex
-
-  - type: regex_parser
-    id: dnsupdater_init_regex
-    parse_from: $record
-    regex: '^[^{]+(?P<rpi_json>.*)'
     output: dnsupdater_json_parser
 
   - type: json_parser
     id: dnsupdater_json_parser
-    parse_from: $record.rpi_json
+    parse_from: $record
     output: gcloud_output
 ## END dns_update ##
 
