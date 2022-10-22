@@ -1,0 +1,291 @@
+pipeline:
+  - type: file_input
+    id: acamar_local
+    include:
+      - /var/log/auth.log
+      - /var/log/syslog
+      - /var/log/daemon.log
+      - /var/log/kern.log
+    labels:
+      log_type: 'syslog.localfile'
+      log_host: 'acamar'
+      log_source: 'stanza'
+    output: gcloud_output
+
+  - type: file_input
+    id: hass_logs
+    include:
+      - /home/hass-log/logs/home-assistant.log
+    labels:
+      log_type: 'home-assistant'
+      log_host: 'acamar'
+      log_source: 'stanza'
+    multiline:
+      line_start_pattern: '^\d{4}-\d{2}\-\d{2}\s\d{2}:\d{2}:\d{2}.\d{3}\s[A-Z]+\s'
+    output: gcloud_output
+
+## pfsense firewall logs
+  - type: udp_input
+    id: pfsense_filterlog
+    listen_address: '0.0.0.0:51401'
+    labels:
+      log_type: 'pfsense'
+      log_host: 'pi'
+      log_source: 'stanza'
+    output: pfsense_syslog_router
+
+## route between filterlog, dhcpd, miniupnpd, cron
+  - type: router
+    id: pfsense_syslog_router
+    routes:
+      - output: filterlog_init_regex
+        expr: '$record matches " filterlog"'
+      - output: dhcpd_init_regex
+        expr: '$record matches " dhcpd"'
+      - output: cron_init_regex
+        expr: '$record matches " /usr/sbin/cron"'
+      - output: gcloud_output
+        expr: 'true'
+
+### BEGIN filterlog regex parsing ###
+  - type: regex_parser
+    id: filterlog_init_regex
+    parse_from: $record
+    preserve_to: message
+    regex: '(?P<process>filterlog)\[(?P<pid>\d+)\]: (?P<rule>\d+),(?P<subrule>\d+)*,(?P<anchor>[^,]+)*,(?P<tracker>\d+),(?P<interface>[^,]+),(?P<reason>[^,]+),(?P<action>\w+),(?P<direction>\w+),(?P<ip_specific_data>.*)'
+    output: filterlog_ip_router
+
+## ip version routing
+  - type: router
+    id: filterlog_ip_router
+    routes:
+      - output: filterlog_ipv4_regex
+        expr: '$record.ip_specific_data matches "^4,"'
+      - output: filterlog_ipv6_regex
+        expr: '$record.ip_specific_data matches "^6,"'
+      - output: gcloud_output
+        expr: 'true'
+
+## ipv4
+  - type: regex_parser
+    id: filterlog_ipv4_regex
+    parse_from: $record.ip_specific_data
+    preserve_to: ip_specific_data
+    regex: '^(?P<ip_ver>4),(?P<tos>[^,]*),(?P<ecn>[^,]*),(?P<ttl>\d+),(?P<id>\d+),(?P<offset>\d+),(?P<flags>\w+),(?P<proto_id>\d+),(?P<proto_text>[^,]+)'
+    output: filterlog_proto_router
+
+## ipv6
+  - type: regex_parser
+    id: filterlog_ipv6_regex
+    parse_from: $record.ip_specific_data
+    preserve_to: ip_specific_data
+    regex: '^(?P<ip_ver>6),(?P<class>\w+),(?P<flow_label>[^,]*),(?P<hop_limit>\d+),(?P<proto_text>[^,]+),(?P<proto_id>\d+)'
+    output: filterlog_proto_router
+
+## route protocols tcp / udp / igmp / icmp
+  - type: router
+    id: filterlog_proto_router
+    routes:
+      - output: filterlog_tcp_regex
+        expr: '$record.proto_text matches "(tcp|TCP)"'
+      - output: filterlog_udp_regex
+        expr: '$record.proto_text matches "(udp|UDP)"'
+      - output: filterlog_igmp_regex
+        expr: '$record.proto_text matches "(igmp|IGMP)"'
+      - output: filterlog_icmp_regex
+        expr: '$record.proto_text matches "(icmp|ICMP)"'
+      - output: filterlog_options_regex
+        expr: '$record.proto_text matches "(?i:options)"'
+      - output: gcloud_output
+        expr: 'true'
+
+## tcp parsing
+  - type: regex_parser
+    id: filterlog_tcp_regex
+    parse_from: $record.ip_specific_data
+    preserve_to: ip_specific_data
+    regex: '(?:tcp|TCP),(?:\d+,)?(?P<length>\d+),(?P<src_ip>[^,]+),(?P<dest_ip>[^,]+),(?P<src_port>\d+),(?P<dest_port>\d+),(?P<data_length>\d+),(?P<tcp_flags>\w+),(?P<sequence_number>[\d:]*),(?P<ack_number>\d*),(?P<tcp_window>\d*),(?P<urg>[^,]*),(?P<tcp_options>.*)'
+    output: gcloud_output
+
+## udp parsing
+  - type: regex_parser
+    id: filterlog_udp_regex
+    parse_from: $record.ip_specific_data
+    preserve_to: ip_specific_data
+    regex: '(?:udp|UDP),(?:\d+,)?(?P<length>\d+),(?P<src_ip>[^,]+),(?P<dest_ip>[^,]+),(?P<src_port>\d+),(?P<dest_port>\d+),(?P<data_length>\d+)'
+    output: gcloud_output
+
+## igmp parsing
+  - type: regex_parser
+    id: filterlog_icmp_regex
+    parse_from: $record.ip_specific_data
+    preserve_to: ip_specific_data
+    regex: '(?:icmp|ICMP|ICMPv6|icmpv6),(?:\d+,)?(?P<length>\d+),(?P<src_ip>[^,]+),(?P<dest_ip>[^,]+),(?P<icmp_data>.*)'
+    output: gcloud_output
+
+## igmp parsing
+  - type: regex_parser
+    id: filterlog_igmp_regex
+    parse_from: $record.ip_specific_data
+    preserve_to: ip_specific_data
+    regex: '(?:igmp|IGMP),(?:\d+),(?P<src_ip>[^,]+),(?P<dest_ip>[^,]+),datalength=(?P<data_length>\d+)'
+    output: gcloud_output
+
+## options parsing
+  - type: regex_parser
+    id: filterlog_options_regex
+    parse_from: $record.ip_specific_data
+    preserve_to: ip_specific_data
+    regex: '(?i:options),(?:\d+),(?P<options_length>\d+),(?P<src_ip>[^,]+),(?P<dest_ip>[^,]+),(?P<options_data>.*)'
+    output: gcloud_output
+### END filterlog parsing ###
+
+### BEGIN DHCPD parsing ###
+  - type: regex_parser
+    id: dhcpd_init_regex
+    parse_from: $record
+    preserve_to: message
+    regex: '(?P<process>dhcpd)\[(?P<pid>\d+)\]: (?P<dhcp_cmd>\w+) (?P<dhcp_msg>.*)'
+    output: dhcp_cmd_router
+
+  - type: router
+    id: dhcp_cmd_router
+    routes:
+      - output: dhcpd_req_regex
+        expr: '$record.dhcp_cmd matches "(?i:DHCPREQUEST)"'
+      - output: dhcpd_ack_regex
+        expr: '$record.dhcp_cmd matches "(?i:dhcpack)"'
+      - output: dhcpd_uid_regex
+        expr: '$record.dhcp_cmd matches "(?i:uid)"'
+      - output: gcloud_output
+        expr: 'true'
+
+## DHCP REQ
+  - type: regex_parser
+    id: dhcpd_req_regex
+    parse_from: $record.dhcp_msg
+    regex: 'for (?P<src_ip>[^\s]+) (?:\((?P<src_gw>[^\)]+)\) )*from (?P<src_mac>[^\s]+) (?:\((?P<src_hostname>[^\)]+)\) )*via (?P<src_intf>[^\s]+)'
+    output: gcloud_output
+
+## DHCP ack
+  - type: regex_parser
+    id: dhcpd_ack_regex
+    parse_from: $record.dhcp_msg
+    regex: 'on (?P<src_ip>[^\s]+) to (?P<src_mac>[^\s]+) (?:\((?P<src_hostname>[^\)]+)\) )*via (?P<src_intf>[^\s]+)'
+    output: gcloud_output
+
+## uid lease
+  - type: regex_parser
+    id: dhcpd_uid_regex
+    parse_from: $record.dhcp_msg
+    regex: 'lease (?P<src_ip>[^\s]+) for client (?P<src_mac>[^\s]+) is duplicate on (?P<dhcp_net>[^\s]+)'
+    output: gcloud_output
+
+### END DHCPD parsing ###
+
+### BEGIN cron parsing ###
+  - type: regex_parser
+    id: cron_init_regex
+    parse_from: $record
+    preserve_to: message
+    regex: '(?P<process>cron)\[(?P<pid>[^\]]+)\]: \((?P<cron_user>[^\)]+)\) CMD \((?P<cron_cmd>[^\)]+)\)'
+    output: gcloud_output
+### END cron parsing ###
+
+## BEGIN ubiquiti logs
+  - type: ubiquiti
+    id: ubiquiti_syslog
+    listen_ip: '0.0.0.0'
+    listen_port: 51402
+    location: 'America/Chicago'
+    output: ubiquiti_meta
+
+  - type: metadata
+    id: ubiquiti_meta
+    labels:
+      log_type: 'network'
+      log_host: 'ubiquiti' 
+      log_source: 'stanza'
+    output: gcloud_output
+## END ubiquiti logs
+
+## BEGIN suricata logs
+  - type: udp_input
+    id: suricata_syslog
+    listen_address: '0.0.0.0:51403'
+    labels:
+      log_source: 'stanza'
+      log_type: 'suricata'
+      log_host: 'pi'
+    output: suricata_init_regex
+
+  - type: regex_parser
+    id: suricata_init_regex
+    parse_from: $record
+    regex: '\[meta sequenceId="\d+"\] "\d+\-\d+\-\d+T\d+:\d+:\d+\.\d+\-\d+",(?P<eve_json>.*$)'
+    output: suricata_json_reformat
+
+  - type: add
+    id: suricata_json_reformat
+    field: eve_json
+    value: EXPR("{" + $record.eve_json)
+    output: suricata_json_parser
+
+  - type: json_parser
+    id: suricata_json_parser
+    parse_from: $record.eve_json
+    output: gcloud_output
+## END suricata logs
+
+## BEGIN rpi_jukebox ##
+  - type: udp_input
+    id: rpijukebox_syslog
+    listen_address: '0.0.0.0:51404'
+    labels:
+      log_type: 'rpi_jukebox'
+      log_host: 'ginan'
+      log_source: 'stanza'
+    output: rpijukebox_init_regex
+
+  - type: regex_parser
+    id: rpijukebox_init_regex
+    parse_from: $record
+    regex: '^[^{]+(?P<rpi_json>.*)'
+    output: rpijukebox_json_parser
+
+  - type: json_parser
+    id: rpijukebox_json_parser
+    parse_from: $record.rpi_json
+    output: gcloud_output
+## END rpi_jukebox ##
+
+## BEGIN dns_update ##
+  - type: udp_input
+    id: dnsupdater_syslog
+    listen_address: '0.0.0.0:51405'
+    labels:
+      log_type: 'dns_update'
+      log_host: 'acamar'
+      log_source: 'stanza'
+    output: dnsupdater_init_regex
+
+  - type: regex_parser
+    id: dnsupdater_init_regex
+    parse_from: $record
+    regex: '^[^{]+(?P<rpi_json>.*)'
+    output: dnsupdater_json_parser
+
+  - type: json_parser
+    id: dnsupdater_json_parser
+    parse_from: $record.rpi_json
+    output: gcloud_output
+## END dns_update ##
+
+### Google Cloud logging ###
+  - type: google_cloud_output
+    id: gcloud_output
+    credentials_file: /opt/observiq/stanza/home-logging.json
+
+### fall through to stdout for debug ###
+  - type: stdout
+    id: stdout
